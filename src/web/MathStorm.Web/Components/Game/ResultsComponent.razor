@@ -1,14 +1,20 @@
 @rendermode InteractiveServer
-@inject MathStorm.Web.Services.IRemoteFunctionsService FunctionService
+@inject MathStorm.Core.IMathStormService MathStormService
+@inject ILogger<ResultsComponent> Logger
 @using MathStorm.Web.Components.Game
-@using MathStorm.Common.DTOs
+@using MathStorm.Core.DTOs
+
+<UsernamePromptComponent IsVisible="@showUsernamePrompt"
+                         TotalScore="@GameSession.TotalScore"
+                         OnSave="HandleSaveScore"
+                         OnSkip="HandleSkipSave" />
 
 <div class="row">
     <div class="col">
         <div class="text-center mb-4">
             <h2><i class="fas fa-trophy"></i> Game Complete!</h2>
             <h4 class="text-primary">Total Score: @GameSession.TotalScore.ToString("F1")</h4>
-            <p class="text-muted">Lower scores are better! (Error% × Time + Time × 10)</p>
+            <p class="text-muted">Lower scores are better! Score = Accuracy Score + Time Score</p>
         </div>
 
         @* GenAI Analysis Section *@
@@ -54,7 +60,9 @@
                                 <th class="text-end">Correct Answer</th>
                                 <th class="text-end">Error %</th>
                                 <th class="text-end">Time (s)</th>
-                                <th class="text-end">Score</th>
+                                <th class="text-end">Accuracy Score</th>
+                                <th class="text-end">Time Score</th>
+                                <th class="text-end">Total Score</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -62,7 +70,7 @@
                             {
                                 <tr class="@GetRowClass(question)">
                                     <td><span class="me-2 @GetOperationColorClass(question.Operation)">@GetOperationSymbol(question.Operation)</span>@question.QuestionText</td>
-                                    <td class="text-end">@(question.UserAnswer.HasValue ? FormatAnswer(question.UserAnswer.Value, question.Operation) : "N/A")</td>
+                                    <td class="text-end">@(question.UserAnswer.HasValue? FormatAnswer(question.UserAnswer.Value, question.Operation) : "N/A")</td>
                                     <td class="text-end">@FormatAnswer(question.CorrectAnswer, question.Operation)</td>
                                     <td class="text-end">
                                         <span class="badge @GetErrorBadgeClass(question.PercentageDifference)">
@@ -70,13 +78,19 @@
                                         </span>
                                     </td>
                                     <td class="text-end">@question.TimeInSeconds.ToString("F1")</td>
+                                    <td class="text-end">@question.AccuracyScore.ToString("F1")</td>
+                                    <td class="text-end">@question.TimeScore.ToString("F1")</td>
                                     <td class="text-end">@question.Score.ToString("F1")</td>
                                 </tr>
                             }
                         </tbody>
                         <tfoot class="table-dark">
                             <tr>
-                                <td colspan="5"><strong>Total Score:</strong></td>
+                                <td colspan="3"><strong>Averages/Totals:</strong></td>
+                                <td class="text-end"><strong>@(GameSession.Questions.Any() ? GameSession.Questions.Average(q => q.PercentageDifference).ToString("F1") : "0.0")%</strong></td>
+                                <td class="text-end"><strong>@(GameSession.Questions.Any() ? GameSession.Questions.Average(q => q.TimeInSeconds).ToString("F1") : "0.0")</strong></td>
+                                <td class="text-end"><strong>@GameSession.Questions.Sum(q => q.AccuracyScore).ToString("F1")</strong></td>
+                                <td class="text-end"><strong>@GameSession.Questions.Sum(q => q.TimeScore).ToString("F1")</strong></td>
                                 <td class="text-end"><strong>@GameSession.TotalScore.ToString("F1")</strong></td>
                             </tr>
                         </tfoot>
@@ -103,13 +117,25 @@
         <div class="card mt-4">
             <div class="card-body">
                 <h6><i class="fas fa-info-circle"></i> Scoring Information</h6>
-                <ul class="list-unstyled mb-0">
-                    <li><i class="fas fa-check text-success"></i> <strong>Perfect answers (0% error):</strong> Score = Time × 10</li>
-                    <li><i class="fas fa-exclamation text-warning"></i> <strong>Close answers (1-10% error):</strong> Low accuracy penalty</li>
-                    <li><i class="fas fa-times text-danger"></i> <strong>Incorrect answers (>10% error):</strong> High accuracy penalty</li>
-                    <li><i class="fas fa-clock text-info"></i> <strong>Speed matters:</strong> Faster answers get lower scores</li>
-                    <li><i class="fas fa-calculator text-primary"></i> <strong>Formula:</strong> (Error% × Time) + (Time × 10)</li>
+                <p class="mb-3"><strong>Lower scores are better!</strong> Your score is calculated from two components:</p>
+                <ul class="list-unstyled mb-3">
+                    <li class="mb-2"><i class="fas fa-bullseye text-danger"></i> <strong>Accuracy Score = Error% × 3</strong>
+                        <ul class="ms-4 mt-1">
+                            <li>Perfect (0% error): 0 points</li>
+                            <li>Small error (10%): 30 points</li>
+                            <li>Large error (capped at 200%): 600 points max</li>
+                        </ul>
+                    </li>
+                    <li class="mb-2"><i class="fas fa-clock text-info"></i> <strong>Time Score:</strong>
+                        <ul class="ms-4 mt-1">
+                            <li>0-10 seconds: Time × 5/10/15 points (depends on level)</li>
+                            <li>Over 10 seconds: First 10 + (extra seconds × 2.5/5/7.5)</li>
+                            <li>Example: 15 seconds = 100 + (5 × 5) = 125 points</li>
+                        </ul>
+                    </li>
                 </ul>
+                <p class="mb-0"><i class="fas fa-calculator text-primary"></i> <strong>Total Score = Accuracy Score + Time Score</strong></p>
+                <p class="text-muted small mb-0">Note: Accuracy is weighted 3× heavier than time to reward correctness!</p>
             </div>
         </div>
     </div>
@@ -117,7 +143,6 @@
 
 @code {
     [Parameter] public GameSession GameSession { get; set; } = new();
-    [Parameter] public UserAuthResponseDto? CurrentUser { get; set; }
     [Parameter] public EventCallback OnRestartGame { get; set; }
 
     private bool showLeaderboard = false;
@@ -125,67 +150,47 @@
     private string? currentUserId;
     private bool userMadeLeaderboard = false;
 
+    // Username prompt state
+    private bool showUsernamePrompt = true;
+    private string? savedUsername;
+
     // Analysis state
     private bool isAnalysisLoading = false;
     private string analysisResult = string.Empty;
     private string selectedPersonalityDisplay = string.Empty;
 
-    // Background processing state
-    private bool isBackgroundProcessing = false;
-
-    protected override async Task OnInitializedAsync()
+    private async Task HandleSaveScore(string username)
     {
-        // Show results immediately, no prompt needed
-        // Start background processing for leaderboard and analysis
-        await StartBackgroundProcessing();
-    }
-
-    private async Task StartBackgroundProcessing()
-    {
-        if (CurrentUser == null)
-        {
-            // No user authenticated, just show basic results
-            return;
-        }
-
-        isBackgroundProcessing = true;
+        savedUsername = username;
+        showUsernamePrompt = false;
         StateHasChanged();
 
-        try
-        {
-            // Start analysis in background
-            var analysisTask = StartGameAnalysisBackground();
-
-            // Submit game results and get leaderboard
-            await SubmitGameResults();
-
-            // Wait for analysis to complete
-            await analysisTask;
-        }
-        catch (Exception ex)
-        {
-            // Handle gracefully - log error but don't show to user
-            // Analysis or leaderboard failure shouldn't break the results display
-        }
-        finally
-        {
-            isBackgroundProcessing = false;
-            StateHasChanged();
-        }
+        // Now submit game results with the provided username
+        await SubmitGameResultsWithUsername(username);
     }
 
-    private async Task SubmitGameResults()
+    private async Task HandleSkipSave()
     {
-        if (CurrentUser == null) return;
+        showUsernamePrompt = false;
+        StateHasChanged();
 
+        // Still run analysis even when skipping leaderboard
+        await ProcessAnalysisWithoutLeaderboard();
+    }
+
+    private async Task SubmitGameResultsWithUsername(string username)
+    {
         try
         {
+            var gameId = Guid.NewGuid().ToString();
+            var userId = Guid.NewGuid().ToString();
+
             // Create request DTO
             var request = new GameResultsRequestDto
             {
-                GameId = Guid.NewGuid().ToString(),
-                UserId = CurrentUser.UserId,
-                Username = CurrentUser.Username,
+                GameId = gameId,
+                UserId = userId,
+                Username = username,
                 Difficulty = GameSession.Difficulty.ToString(),
                 Questions = GameSession.Questions.Select(q => new QuestionResultDto
                 {
@@ -197,56 +202,36 @@
                     UserAnswer = q.UserAnswer ?? 0,
                     TimeInSeconds = q.TimeInSeconds,
                     PercentageDifference = q.PercentageDifference,
-                    Score = q.Score
+                    Score = q.Score,
+                    AccuracyScore = q.AccuracyScore,
+                    TimeScore = q.TimeScore
                 }).ToList(),
-                Analysis = analysisResult // Will be null initially, but we'll update the game record later
+                Analysis = null // Analysis will be added later when it comes back from LLM
             };
 
-            // Submit game results to Function API (if available)
-            var response = await FunctionService.SubmitGameResultsAsync(request);
+            // Step 1: Submit game results to save game record (without adding to leaderboard)
+            var response = await MathStormService.SubmitGameResultsAsync(request);
 
             if (response != null)
             {
-                currentUserId = CurrentUser.UserId;
-                userMadeLeaderboard = response.AddedToLeaderboard;
+                currentUserId = userId;
 
-                // Get updated leaderboard
-                var leaderboardResponse = await FunctionService.GetLeaderboardAsync(GameSession.Difficulty.ToString());
-                if (leaderboardResponse?.Entries != null)
-                {
-                    leaderboardEntries = leaderboardResponse.Entries.Select(e => new LeaderboardEntry
-                    {
-                        Id = e.Id,
-                        UserId = e.UserId,
-                        Username = e.Username,
-                        GameId = e.GameId,
-                        Difficulty = e.Difficulty,
-                        Score = e.Score,
-                        AchievedAt = e.AchievedAt,
-                        Rank = e.Rank
-                    }).ToList();
-                }
-                else
-                {
-                    leaderboardEntries = new List<LeaderboardEntry>();
-                }
-
-                showLeaderboard = true;
-                StateHasChanged();
+                // Step 2: Process analysis and then add to leaderboard
+                await ProcessAnalysisAndLeaderboard(gameId, username, userId);
             }
             else
             {
                 // Function service unavailable - create mock leaderboard entry
-                currentUserId = CurrentUser.UserId;
-                userMadeLeaderboard = true; // Mock that user made leaderboard
+                currentUserId = userId;
+                userMadeLeaderboard = true;
                 leaderboardEntries = new List<LeaderboardEntry>
                 {
                     new LeaderboardEntry
                     {
                         Id = Guid.NewGuid().ToString(),
-                        UserId = CurrentUser.UserId,
-                        Username = CurrentUser.Username,
-                        GameId = request.GameId,
+                        UserId = userId,
+                        Username = username,
+                        GameId = gameId,
                         Difficulty = GameSession.Difficulty.ToString(),
                         Score = GameSession.TotalScore,
                         AchievedAt = DateTime.UtcNow,
@@ -255,36 +240,103 @@
                 };
                 showLeaderboard = true;
                 StateHasChanged();
+
+                // Still process analysis
+                await ProcessAnalysisInBackground(gameId, username, userId);
             }
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // Handle error gracefully - still show results even if leaderboard fails
+            // Handle error gracefully - still show results even if submission fails
+            Logger.LogWarning(ex, "Failed to submit game results for user {Username}", username);
             showLeaderboard = false;
         }
     }
 
-    private async Task RestartGame()
+    private async Task ProcessAnalysisAndLeaderboard(string gameId, string username, string userId)
     {
-        await OnRestartGame.InvokeAsync();
+        if (string.IsNullOrEmpty(gameId)) return;
+
+        try
+        {
+            // Step 1: Perform analysis
+            await PerformAnalysis(username, gameId);
+
+            // Step 2: Update the game record with the analysis (if available)
+            if (!string.IsNullOrEmpty(analysisResult))
+            {
+                await MathStormService.UpdateGameAnalysisAsync(gameId, analysisResult);
+            }
+
+            // Step 3: Add game to leaderboard
+            var leaderboardResponse = await MathStormService.AddGameToLeaderboardAsync(gameId);
+            if (leaderboardResponse != null)
+            {
+                userMadeLeaderboard = leaderboardResponse.AddedToLeaderboard;
+            }
+
+            // Step 4: Get updated leaderboard
+            var leaderboard = await MathStormService.GetLeaderboardAsync(GameSession.Difficulty.ToString());
+            if (leaderboard?.Entries != null)
+            {
+                leaderboardEntries = leaderboard.Entries.Select(e => new LeaderboardEntry
+                {
+                    Id = e.Id,
+                    UserId = e.UserId,
+                    Username = e.Username,
+                    GameId = e.GameId,
+                    Difficulty = e.Difficulty,
+                    Score = e.Score,
+                    AchievedAt = e.AchievedAt,
+                    Rank = e.Rank
+                }).ToList();
+            }
+            else
+            {
+                leaderboardEntries = new List<LeaderboardEntry>();
+            }
+
+            showLeaderboard = true;
+        }
+        catch (Exception ex)
+        {
+            // Handle gracefully - don't show error to user
+            Logger.LogWarning(ex, "Failed to process game analysis for game {GameId}", gameId);
+            analysisResult = $"Great job completing the game, {username}! " +
+                           $"You scored {GameSession.TotalScore:F1} points. Keep practicing!";
+            selectedPersonalityDisplay = "System";
+            showLeaderboard = false;
+        }
     }
 
-    private async Task StartGameAnalysisBackground()
+    private async Task ProcessAnalysisInBackground(string gameId, string username, string userId)
     {
-        if (CurrentUser == null) return;
+        // This method is kept for the mock/fallback scenario
+        if (string.IsNullOrEmpty(gameId)) return;
 
+        await PerformAnalysis(username, gameId);
+    }
+
+    private async Task ProcessAnalysisWithoutLeaderboard()
+    {
+        // Use descriptive identifier for debugging (not saved to database)
+        var gameId = $"skip-analysis-{DateTime.UtcNow:yyyyMMddHHmmssfff}";
+        await PerformAnalysis("Guest", gameId);
+    }
+
+    private async Task PerformAnalysis(string username, string gameId)
+    {
         try
         {
             isAnalysisLoading = true;
             StateHasChanged();
 
             var personality = GetRandomPersonality();
-            var gameId = Guid.NewGuid().ToString();
 
             var analysisRequest = new ResultsAnalysisRequestDto
             {
                 GameId = gameId,
-                Username = CurrentUser.Username,
+                Username = username,
                 Difficulty = GameSession.Difficulty.ToString(),
                 TotalScore = GameSession.TotalScore,
                 Questions = GameSession.Questions.Select(q => new QuestionResultDto
@@ -297,13 +349,15 @@
                     UserAnswer = q.UserAnswer ?? 0,
                     TimeInSeconds = q.TimeInSeconds,
                     PercentageDifference = q.PercentageDifference,
-                    Score = q.Score
+                    Score = q.Score,
+                    AccuracyScore = q.AccuracyScore,
+                    TimeScore = q.TimeScore
                 }).ToList(),
                 Personality = personality,
-                UserMadeLeaderboard = userMadeLeaderboard
+                UserMadeLeaderboard = false
             };
 
-            var analysisResponse = await FunctionService.AnalyzeGameResultsAsync(analysisRequest);
+            var analysisResponse = await MathStormService.AnalyzeGameResultsAsync(analysisRequest);
 
             if (analysisResponse != null && !string.IsNullOrEmpty(analysisResponse.Analysis))
             {
@@ -311,18 +365,17 @@
             }
             else
             {
-                // Function service unavailable - create mock analysis
-                analysisResult = $"Great job completing the {GameSession.Difficulty} level game, {CurrentUser.Username}! " +
+                analysisResult = $"Great job completing the {GameSession.Difficulty} level game, {username}! " +
                                $"You scored {GameSession.TotalScore:F1} points. " +
                                $"Keep practicing to improve your math skills! " +
-                               $"(Note: AI analysis service is currently unavailable)";
+                               $"(Note: Analysis service is currently unavailable.)";
                 selectedPersonalityDisplay = "System";
             }
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // Handle gracefully - don't show error to user
-            analysisResult = $"Great job completing the game, {CurrentUser.Username}! " +
+            Logger.LogWarning(ex, "Failed to process game analysis for {Username}", username);
+            analysisResult = $"Great job completing the game, {username}! " +
                            $"You scored {GameSession.TotalScore:F1} points. Keep practicing!";
             selectedPersonalityDisplay = "System";
         }
@@ -331,6 +384,11 @@
             isAnalysisLoading = false;
             StateHasChanged();
         }
+    }
+
+    private async Task RestartGame()
+    {
+        await OnRestartGame.InvokeAsync();
     }
 
     private string GetRowClass(MathQuestion question)
@@ -362,18 +420,6 @@
             MathOperation.Multiplication => "text-success",
             MathOperation.Division => "text-info",
             _ => "text-muted"
-        };
-    }
-
-    private string GetOperationIcon(MathOperation operation)
-    {
-        return operation switch
-        {
-            MathOperation.Addition => "fas fa-plus text-primary",
-            MathOperation.Subtraction => "fas fa-minus text-warning",
-            MathOperation.Multiplication => "fas fa-times text-success",
-            MathOperation.Division => "fas fa-divide text-info",
-            _ => "fas fa-question text-muted"
         };
     }
 

@@ -8,10 +8,14 @@ param environmentCode = '#{ENVCODE}#'
 param location = '#{RESOURCEGROUP_LOCATION}#'
 
 param principalId = '#{PRINCIPALID}#'
-param myIpAddress = '#{MYIPADDRESS}#'
+// param myIpAddress = '#{MYIPADDRESS}#'
 param deployCosmos = #{deployCosmos}#
 
-param deduplicateKeyVaultSecrets = false
+param OpenAI_Endpoint = '#{OPENAI_ENDPOINT}#'
+param OpenAI_ApiKey = '#{OPENAI_APIKEY}#'
+
+param servicePlanName = '#{EXISTING_SERVICEPLAN_NAME}#'
+param servicePlanResourceGroupName = '#{EXISTING_SERVICEPLAN_RESOURCEGROUP_NAME}#'
 
 // ----------------------------------------------------------------------------------------------------
 // Experiment: change this to read environment instead of using Quezta replace

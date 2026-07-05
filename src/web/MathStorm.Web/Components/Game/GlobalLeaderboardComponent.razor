@@ -1,4 +1,6 @@
 @rendermode InteractiveServer
+@inject IJSRuntime JSRuntime
+@inject MathStorm.Core.IMathStormService MathStormService
 
 @if (LeaderboardEntries != null && LeaderboardEntries.Any())
 {
@@ -16,6 +18,7 @@
                             <th class="text-center">Level</th>
                             <th class="text-end">Score</th>
                             <th class="text-end">Achieved</th>
+                            <th class="text-center">Analysis</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -48,12 +51,20 @@
                                 </td>
                                 <td class="text-end">@entry.Score.ToString("F1")</td>
                                 <td class="text-end">@entry.AchievedAt.ToString("MMM dd, yyyy")</td>
+                                <td class="text-center">
+                                    <i class="fas fa-comment-dots text-info analysis-icon"
+                                       @onclick="@(() => ShowAnalysis(entry.GameId))"
+                                       data-bs-toggle="tooltip"
+                                       data-bs-placement="top"
+                                       title="Click to view game analysis"
+                                       style="cursor: pointer;"></i>
+                                </td>
                             </tr>
                         }
                     </tbody>
                 </table>
             </div>
-            
+
             @if (UserMadeLeaderboard)
             {
                 <div class="alert alert-success text-center mt-3">
@@ -61,11 +72,11 @@
                     <p class="mb-0">You made it to the global leaderboard! 🎉</p>
                 </div>
             }
-            
+
             <div class="row mt-3">
                 <div class="col-md-12 text-center">
                     <p class="text-muted small">
-                        <i class="fas fa-info-circle"></i> 
+                        <i class="fas fa-info-circle"></i>
                         The global leaderboard shows the top scores from all difficulty levels combined
                     </p>
                 </div>
@@ -85,10 +96,218 @@ else
     </div>
 }
 
+@* Analysis Modal *@
+@if (showAnalysisModal)
+{
+    <div class="modal fade show" style="display: block;" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="fas fa-gamepad"></i> Game Details & Analysis
+                    </h5>
+                    <button type="button" class="btn-close" @onclick="CloseAnalysisModal"></button>
+                </div>
+                <div class="modal-body">
+                    @if (isLoadingAnalysis)
+                    {
+                        <div class="text-center">
+                            <div class="spinner-border text-info" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <p class="mt-2">Loading game details...</p>
+                        </div>
+                    }
+                    else if (currentGame != null)
+                    {
+                        <div class="row">
+                            <!-- Game Summary -->
+                            <div class="col-md-6">
+                                <h6><i class="fas fa-chart-line"></i> Game Summary</h6>
+                                <div class="card mb-3">
+                                    <div class="card-body">
+                                        <p><strong>Username:</strong> @currentGame.Username</p>
+                                        <p><strong>Difficulty:</strong> <span class="badge @GetDifficultyBadgeClass(currentGame.Difficulty)">@currentGame.Difficulty</span></p>
+                                        <p><strong>Accuracy Score:</strong> @currentGame.Questions.Sum(q => q.AccuracyScore).ToString("F1")</p>
+                                        <p><strong>Time Score:</strong> @currentGame.Questions.Sum(q => q.TimeScore).ToString("F1")</p>
+                                        <p><strong>Total Score:</strong> @currentGame.TotalScore.ToString("F1")</p>
+                                        <p><strong>Completed:</strong> @currentGame.CompletedAt.ToString("MMM dd, yyyy HH:mm")</p>
+                                        <p class="mb-0"><strong>Questions:</strong> @currentGame.Questions.Count</p>
+                                    </div>
+                                </div>
+
+                                <!-- Scoring Information -->
+                                <h6><i class="fas fa-info-circle"></i> Scoring Information</h6>
+                                <div class="card mb-3">
+                                    <div class="card-body small">
+                                        <p class="mb-2"><strong>Lower scores are better!</strong></p>
+                                        <p class="mb-1"><i class="fas fa-bullseye text-danger"></i> <strong>Accuracy Score = Error% × 3</strong></p>
+                                        <ul class="ms-3 mb-2">
+                                            <li>Perfect (0% error): 0 points</li>
+                                            <li>Small error (10%): 30 points</li>
+                                            <li>Large error (capped at 200%): 600 points max</li>
+                                        </ul>
+                                        <p class="mb-1"><i class="fas fa-clock text-info"></i> <strong>Time Score:</strong></p>
+                                        <ul class="ms-3 mb-2">
+                                            <li>0-10 seconds: Time × 5/10/15 points (depends on level)</li>
+                                            <li>Over 10 seconds: First 10 + (extra seconds × 2.5/5/7.5)</li>
+                                        </ul>
+                                        <p class="mb-0"><i class="fas fa-calculator text-primary"></i> <strong>Total Score = Accuracy Score + Time Score</strong></p>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Question Details and AI Analysis -->
+                            <div class="col-md-6">
+                                <!-- Question Details -->
+                                <h6><i class="fas fa-list"></i> Question Details</h6>
+                                <div style="max-height: 250px; overflow-y: auto;" class="mb-3">
+                                    @foreach (var question in currentGame.Questions)
+                                    {
+                                        <div class="card mb-2 @GetQuestionCardClass(question.PercentageDifference)">
+                                            <div class="card-body p-2">
+                                                <div class="d-flex justify-content-between align-items-center">
+                                                    <div>
+                                                        <strong>@GetOperationSymbol(question.Operation) @question.Number1 @GetOperationString(question.Operation) @question.Number2 = ?</strong>
+                                                    </div>
+                                                    <div class="text-end">
+                                                        <small class="text-muted">@question.TimeInSeconds.ToString("F1")s</small>
+                                                    </div>
+                                                </div>
+                                                <div class="row mt-1">
+                                                    <div class="col-6">
+                                                        <small><strong>Correct:</strong> @FormatAnswer(question.CorrectAnswer, question.Operation)</small>
+                                                    </div>
+                                                    <div class="col-6">
+                                                        <small><strong>Your Answer:</strong> @FormatAnswer(question.UserAnswer ?? 0, question.Operation)</small>
+                                                    </div>
+                                                </div>
+                                                <div class="row">
+                                                    <div class="col-3">
+                                                        <small><strong>Error:</strong> <span class="badge @GetErrorBadgeClass(question.PercentageDifference)">@question.PercentageDifference.ToString("F1")%</span></small>
+                                                    </div>
+                                                    <div class="col-3">
+                                                        <small><strong>Accuracy:</strong> @question.AccuracyScore.ToString("F1")</small>
+                                                    </div>
+                                                    <div class="col-3">
+                                                        <small><strong>Time:</strong> @question.TimeScore.ToString("F1")</small>
+                                                    </div>
+                                                    <div class="col-3">
+                                                        <small><strong>Total:</strong> @question.Score.ToString("F1")</small>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    }
+                                </div>
+
+                                <!-- AI Analysis -->
+                                <h6><i class="fas fa-robot"></i> AI Analysis</h6>
+                                @if (!string.IsNullOrEmpty(currentGame.Analysis))
+                                {
+                                    <div class="card">
+                                        <div class="card-body">
+                                            <div class="analysis-content" style="max-height: 200px; overflow-y: auto;">
+                                                @((MarkupString)currentGame.Analysis.Replace("\n", "<br />"))
+                                            </div>
+                                        </div>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="card">
+                                        <div class="card-body text-center text-muted">
+                                            <i class="fas fa-exclamation-circle"></i>
+                                            <p class="mb-0">No AI analysis available for this game.</p>
+                                        </div>
+                                    </div>
+                                }
+                            </div>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="text-center text-muted">
+                            <i class="fas fa-exclamation-triangle"></i>
+                            <p class="mb-2">Game details could not be loaded.</p>
+                            <small class="text-muted">This may be due to a connectivity issue with the game API. Please check that the Function App is running and properly configured.</small>
+                        </div>
+                    }
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" @onclick="CloseAnalysisModal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="modal-backdrop fade show"></div>
+}
+
 @code {
     [Parameter] public List<LeaderboardEntry>? LeaderboardEntries { get; set; }
     [Parameter] public string? CurrentUserId { get; set; }
     [Parameter] public bool UserMadeLeaderboard { get; set; }
+
+    // Modal state
+    private bool showAnalysisModal = false;
+    private bool isLoadingAnalysis = false;
+    private Game? currentGame = null;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            // Initialize Bootstrap tooltips
+            await Task.Delay(100); // Small delay to ensure DOM is ready
+            await InitializeTooltips();
+        }
+    }
+
+    private async Task InitializeTooltips()
+    {
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("initializeTooltips");
+        }
+        catch
+        {
+            // Ignore errors - tooltips are enhancement, not critical
+        }
+    }
+
+    private async Task ShowAnalysis(string gameId)
+    {
+        if (string.IsNullOrEmpty(gameId)) return;
+
+        showAnalysisModal = true;
+        isLoadingAnalysis = true;
+        currentGame = null;
+        StateHasChanged();
+
+        try
+        {
+            var game = await MathStormService.GetGameByIdAsync(gameId);
+            currentGame = game;
+        }
+        catch (Exception ex)
+        {
+            currentGame = null;
+            // Log the error for debugging
+            System.Console.WriteLine($"Error loading game details for gameId {gameId}: {ex.Message}");
+        }
+        finally
+        {
+            isLoadingAnalysis = false;
+            StateHasChanged();
+        }
+    }
+
+    private void CloseAnalysisModal()
+    {
+        showAnalysisModal = false;
+        currentGame = null;
+        StateHasChanged();
+    }
 
     private string GetRowClass(LeaderboardEntry entry)
     {
@@ -116,7 +335,7 @@ else
         return rank switch
         {
             1 => "🥇",
-            2 => "🥈", 
+            2 => "🥈",
             3 => "🥉",
             _ => ""
         };
@@ -143,6 +362,59 @@ else
             "Intermediate" => "⚡",
             "Expert" => "🔥",
             _ => ""
+        };
+    }
+
+    private string GetOperationSymbol(string operation)
+    {
+        return operation switch
+        {
+            "Addition" => "➕",
+            "Subtraction" => "➖",
+            "Multiplication" => "✖️",
+            "Division" => "➗",
+            _ => "❓"
+        };
+    }
+
+    private string GetOperationString(string operation)
+    {
+        return operation switch
+        {
+            "Addition" => "+",
+            "Subtraction" => "-",
+            "Multiplication" => "×",
+            "Division" => "÷",
+            _ => "?"
+        };
+    }
+
+    private string FormatAnswer(double answer, string operation)
+    {
+        return operation switch
+        {
+            "Division" => answer.ToString("F1"),
+            _ => answer.ToString("F0")
+        };
+    }
+
+    private string GetQuestionCardClass(double errorPercentage)
+    {
+        return errorPercentage switch
+        {
+            0 => "border-success",
+            <= 10 => "border-warning",
+            _ => "border-danger"
+        };
+    }
+
+    private string GetErrorBadgeClass(double errorPercentage)
+    {
+        return errorPercentage switch
+        {
+            0 => "bg-success",
+            <= 10 => "bg-warning text-dark",
+            _ => "bg-danger"
         };
     }
 }

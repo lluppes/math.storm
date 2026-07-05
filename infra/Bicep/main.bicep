@@ -1,5 +1,6 @@
 ﻿// --------------------------------------------------------------------------------
 // Main Bicep file that creates all of the Azure Resources for one environment
+// After refactoring: Web App now handles all game logic directly without Azure Functions
 // --------------------------------------------------------------------------------
 // To deploy this Bicep manually:
 // 	 az login
@@ -9,38 +10,38 @@
 param appName string = ''
 param environmentCode string = 'azd'
 param location string = resourceGroup().location
-param webSiteSku string = 'B1'
 param servicePlanName string = ''
-param webAppKind string = 'linux' // 'linux' or 'windows'
+param servicePlanResourceGroupName string = '' // if using an existing service plan in a different resource group
 
-param storageSku string = 'Standard_LRS'
-param functionAppSku string = 'B1'
-param functionAppSkuFamily string = ''
-param functionAppSkuTier string = 'Dynamic'
+param webAppKind string = 'linux' // 'linux' or 'windows'
+param webSiteSku string = 'B1'
+
+param OpenAI_Endpoint string
+@secure()
+param OpenAI_ApiKey string
 
 // --------------------------------------------------------------------------------------------------------------
 // Run Settings Parameters
 // --------------------------------------------------------------------------------------------------------------
-@description('Should we run a script to dedupe the KeyVault secrets? (this fails on private networks right now)')
-param deduplicateKeyVaultSecrets bool = true
 @description('Add Role Assignments for the user assigned identity?')
 param addRoleAssignments bool = true
 @description('Should resources be created with public access?')
-param publicAccessEnabled bool = true
-@description('Should we deploy Cosmos DB?')
+// param publicAccessEnabled bool = true
+// @description('Should we deploy Cosmos DB?')
 param deployCosmos bool = true
 
 // --------------------------------------------------------------------------------------------------------------
 // Personal info Parameters
 // --------------------------------------------------------------------------------------------------------------
-@description('My IP address for network access')
-param myIpAddress string = ''
+// @description('My IP address for network access')
+// param myIpAddress string = ''
 @description('Id of the user executing the deployment')
 param principalId string = ''
 
 // --------------------------------------------------------------------------------------------------------------
 // Misc. Parameters
 // --------------------------------------------------------------------------------------------------------------
+// calculated variables disguised as parameters
 param runDateTime string = utcNow()
 
 // --------------------------------------------------------------------------------
@@ -53,13 +54,13 @@ var commonTags = {
 var resourceGroupName = resourceGroup().name
 // var resourceToken = toLower(uniqueString(resourceGroup().id, location))
 
-
 // --------------------------------------------------------------------------------
 module resourceNames 'resourcenames.bicep' = {
   name: 'resourcenames${deploymentSuffix}'
   params: {
     appName: appName
     environmentCode: environmentCode
+    // environmentSpecificFunctionName: ''
   }
 }
 // --------------------------------------------------------------------------------
@@ -67,7 +68,8 @@ module logAnalyticsWorkspaceModule 'modules/monitor/loganalytics.bicep' = {
   name: 'logAnalytics${deploymentSuffix}'
   params: {
     newLogAnalyticsName: resourceNames.outputs.logAnalyticsWorkspaceName
-    newApplicationInsightsName: resourceNames.outputs.webSiteAppInsightsName
+    newWebApplicationInsightsName: resourceNames.outputs.webSiteAppInsightsName
+    // newFunctionApplicationInsightsName: '' // No longer deploying functions
     location: location
     tags: commonTags
   }
@@ -83,10 +85,12 @@ var cosmosContainerArray = [
   { name: gameContainerName, partitionKey: '/id' }
   { name: leaderboardContainerName, partitionKey: '/id' }
 ]
-module cosmosModule 'modules/database/cosmosdb.bicep' = if (deployCosmos) {
+module cosmosModule 'modules/database/cosmosdb.bicep' = {
   name: 'cosmos${deploymentSuffix}'
   params: {
-    accountName: resourceNames.outputs.cosmosDatabaseName 
+    accountName: deployCosmos ? resourceNames.outputs.cosmosDatabaseName : ''
+    // if this is no, then use the existing cosmos so you don't have to wait 20 minutes every time...
+    existingAccountName: deployCosmos ? '' : resourceNames.outputs.cosmosDatabaseName
     location: location
     tags: commonTags
     containerArray: cosmosContainerArray
@@ -110,9 +114,9 @@ module appIdentityRoleAssignments './modules/iam/role-assignments.bicep' = if (a
   params: {
     identityPrincipalId: identity.outputs.managedIdentityPrincipalId
     principalType: 'ServicePrincipal'
-    cosmosName: deployCosmos ? cosmosModule.outputs.name : ''
+    cosmosName: cosmosModule.outputs.name
     keyVaultName: keyVaultModule.outputs.name
-    storageAccountName: functionStorageModule.outputs.name
+    // storageAccountName: '' // No function storage needed
   }
 }
 
@@ -121,20 +125,9 @@ module adminUserRoleAssignments './modules/iam/role-assignments.bicep' = if (add
   params: {
     identityPrincipalId: principalId
     principalType: 'User'
-    cosmosName: deployCosmos ? cosmosModule.outputs.name : ''
+    cosmosName: cosmosModule.outputs.name
     keyVaultName: keyVaultModule.outputs.name
-    storageAccountName: functionStorageModule.outputs.name
-  }
-}
-
-module functionAppRoleAssignments './modules/iam/role-assignments.bicep' = if (addRoleAssignments) {
-  name: 'function-roles${deploymentSuffix}'
-  params: {
-    identityPrincipalId: functionModule.outputs.functionAppPrincipalId
-    principalType: 'ServicePrincipal'
-    cosmosName: deployCosmos ? cosmosModule.outputs.name : ''
-    keyVaultName: keyVaultModule.outputs.name
-    storageAccountName: functionStorageModule.outputs.name
+    // storageAccountName: '' // No function storage needed
   }
 }
 
@@ -142,53 +135,56 @@ module functionAppRoleAssignments './modules/iam/role-assignments.bicep' = if (a
 module keyVaultModule './modules/security/keyvault.bicep' = {
   name: 'keyvault${deploymentSuffix}'
   params: {
+    keyVaultName: resourceNames.outputs.keyVaultName
+    // keyVaultOwnerUserId: principalId
+    // keyVaultOwnerIpAddress: myIpAddress
     location: location
     commonTags: commonTags
-    keyVaultName: resourceNames.outputs.keyVaultName
-    keyVaultOwnerUserId: principalId
-    adminUserObjectIds: [ identity.outputs.managedIdentityPrincipalId ]
-    publicNetworkAccess: publicAccessEnabled ? 'Enabled' : 'Disabled'
-    keyVaultOwnerIpAddress: myIpAddress
-    createUserAssignedIdentity: false
-  }
-}
-module keyVaultSecretList './modules/security/keyvault-list-secret-names.bicep' = if (deduplicateKeyVaultSecrets) {
-  name: 'keyVault-Secret-List-Names${deploymentSuffix}'
-  params: {
-    keyVaultName: keyVaultModule.outputs.name
-    location: location
-    userManagedIdentityId: identity.outputs.managedIdentityId
+    adminUserObjectIds: [ principalId ]
+    applicationUserObjectIds: [ identity.outputs.managedIdentityPrincipalId ]
+    workspaceId: logAnalyticsWorkspaceModule.outputs.logAnalyticsWorkspaceId
+    publicNetworkAccess: 'Enabled'
+    //allowNetworkAccess: 'Allow'
+    useRBAC: true
   }
 }
 
 module keyVaultSecretAppInsights './modules/security/keyvault-secret.bicep' = {
   name: 'keyVaultSecretAppInsights${deploymentSuffix}'
-  dependsOn: [ keyVaultModule, logAnalyticsWorkspaceModule, webSiteModule, functionModule ]
+  dependsOn: [ keyVaultModule, logAnalyticsWorkspaceModule, webSiteModule ]
   params: {
     keyVaultName: keyVaultModule.outputs.name
-    secretName: 'appInsightsInstrumentationKey'
-    secretValue: logAnalyticsWorkspaceModule.outputs.appInsightsInstrumentationKey
-    existingSecretNames: deduplicateKeyVaultSecrets ? keyVaultSecretList!.outputs.secretNameList : ''
+    secretName: 'webAppInsightsInstrumentationKey'
+    secretValue: logAnalyticsWorkspaceModule.outputs.webAppInsightsInstrumentationKey
   }
 }  
 
-module keyVaultSecretCosmos './modules/security/keyvault-cosmos-secret.bicep' = if (deployCosmos) {
+module keyVaultSecretCosmos './modules/security/keyvault-cosmos-secret.bicep' = {
   name: 'keyVaultSecretCosmos${deploymentSuffix}'
-  dependsOn: [ keyVaultModule, cosmosModule, webSiteModule, functionModule  ]
+  dependsOn: [ keyVaultModule, cosmosModule, webSiteModule ]
   params: {
     keyVaultName: keyVaultModule.outputs.name
     accountKeySecretName: 'cosmosAccountKey'
     connectionStringSecretName: 'cosmosConnectionString'
     cosmosAccountName: cosmosModule.outputs.name
-    existingSecretNames: deduplicateKeyVaultSecrets ? keyVaultSecretList!.outputs.secretNameList : ''
+  }
+}
+
+module keyVaultSecretOpenAI './modules/security/keyvault-secret.bicep' = {
+  name: 'keyVaultSecretOpenAI${deploymentSuffix}'
+  dependsOn: [ keyVaultModule ]
+  params: {
+    keyVaultName: keyVaultModule.outputs.name
+    secretName: 'openAIApiKey'
+    secretValue: OpenAI_ApiKey
   }
 }
 
 // --------------------------------------------------------------------------------
-// Service Plan SHARED by webapp and function app
+// Service Plan for webapp
 // --------------------------------------------------------------------------------
 module appServicePlanModule './modules/webapp/websiteserviceplan.bicep' = {
-  name: 'appService${deploymentSuffix}'
+  name: 'appServicePlan${deploymentSuffix}'
   params: {
     location: location
     commonTags: commonTags
@@ -196,6 +192,7 @@ module appServicePlanModule './modules/webapp/websiteserviceplan.bicep' = {
     environmentCode: environmentCode
     appServicePlanName: servicePlanName == '' ? resourceNames.outputs.webSiteAppServicePlanName : servicePlanName
     existingServicePlanName: servicePlanName
+    existingServicePlanResourceGroupName: servicePlanResourceGroupName
     webAppKind: webAppKind
   }
 }
@@ -209,11 +206,12 @@ module webSiteModule './modules/webapp/website.bicep' = {
     commonTags: commonTags
     environmentCode: environmentCode
     webAppKind: webAppKind
-    workspaceId: logAnalyticsWorkspaceModule.outputs.logAnalyticsWorkspaceId
-    appServicePlanName: appServicePlanModule.outputs.name
-    sharedAppInsightsInstrumentationKey: logAnalyticsWorkspaceModule.outputs.appInsightsInstrumentationKey
     managedIdentityId: identity.outputs.managedIdentityId
     managedIdentityPrincipalId: identity.outputs.managedIdentityPrincipalId
+    workspaceId: logAnalyticsWorkspaceModule.outputs.logAnalyticsWorkspaceId
+    appServicePlanName: appServicePlanModule.outputs.name
+    appServicePlanResourceGroupName: appServicePlanModule.outputs.resourceGroupName
+    sharedAppInsightsInstrumentationKey: logAnalyticsWorkspaceModule.outputs.webAppInsightsInstrumentationKey
   }
 }
 
@@ -225,78 +223,24 @@ module webSiteAppSettingsModule './modules/webapp/websiteappsettings.bicep' = {
   name: 'webSiteAppSettings${deploymentSuffix}'
   params: {
     webAppName: webSiteModule.outputs.name
-    appInsightsKey: logAnalyticsWorkspaceModule.outputs.appInsightsInstrumentationKey
+    appInsightsKey: logAnalyticsWorkspaceModule.outputs.webAppInsightsInstrumentationKey
     customAppSettings: {
-      AppSettings__AppInsights_InstrumentationKey: logAnalyticsWorkspaceModule.outputs.appInsightsInstrumentationKey
+      AppSettings__AppInsights_InstrumentationKey: logAnalyticsWorkspaceModule.outputs.webAppInsightsInstrumentationKey
       AppSettings__EnvironmentName: environmentCode
-      FunctionService__BaseUrl: 'https://${functionModule.outputs.hostname}/api'
-      ConnectionStrings__ApplicationInsights: logAnalyticsWorkspaceModule.outputs.appInsightsConnectionString
-    }
-  }
-}
-
-// --------------------------------------------------------------------------------
-// Function App for API endpoints
-// --------------------------------------------------------------------------------
-module functionStorageModule './modules/storage/storage-account.bicep' = {
-  name: 'functionstorage${deploymentSuffix}'
-  params: {
-    storageSku: storageSku
-    storageAccountName: resourceNames.outputs.functionStorageName
-    location: location
-    commonTags: commonTags
-    allowNetworkAccess:  'Allow'    // 'Deny'
-    publicNetworkAccess: 'Enabled'  // 'Disabled'
-  }
-}
-
-module functionModule './modules/functions/functionapp.bicep' = {
-  name: 'function${deploymentSuffix}'
-  dependsOn: [ appIdentityRoleAssignments ]
-  params: {
-    functionAppName: resourceNames.outputs.functionAppName
-    functionAppServicePlanName: resourceNames.outputs.functionAppServicePlanName
-    functionInsightsName: resourceNames.outputs.functionAppInsightsName
-    sharedAppServicePlanName: appServicePlanModule.outputs.name
-    sharedAppInsightsInstrumentationKey: logAnalyticsWorkspaceModule.outputs.appInsightsInstrumentationKey
-    sharedAppInsightsConnectionString: logAnalyticsWorkspaceModule.outputs.appInsightsConnectionString
-    managedIdentityId: identity.outputs.managedIdentityId
-    managedIdentityPrincipalId: identity.outputs.managedIdentityPrincipalId
-    keyVaultName: keyVaultModule.outputs.name
-
-    location: location
-    commonTags: commonTags
-
-    functionKind: 'functionapp,linux'
-    functionAppSku: functionAppSku
-    functionAppSkuFamily: functionAppSkuFamily
-    functionAppSkuTier: functionAppSkuTier
-    functionStorageAccountName: functionStorageModule.outputs.name
-    workspaceId: logAnalyticsWorkspaceModule.outputs.logAnalyticsWorkspaceId
-  }
-}
-resource keyVault 'Microsoft.KeyVault/vaults@2021-10-01' existing = {
-  name: keyVaultModule.outputs.name
-} 
-module functionAppSettingsModule './modules/functions/functionappsettings.bicep' = {
-  name: 'functionAppSettings${deploymentSuffix}'
-  params: {
-    functionAppName: functionModule.outputs.name
-    functionStorageAccountName: functionModule.outputs.storageAccountName
-    functionInsightsKey: logAnalyticsWorkspaceModule.outputs.appInsightsInstrumentationKey
-    keyVaultName: keyVaultModule.outputs.name
-    cosmosConnectionString : deployCosmos ? keyVault.getSecret(keyVaultSecretCosmos.outputs.connectionStringSecretName) : ''
-    customAppSettings: {
-      OpenApi__HideSwaggerUI: 'false'
-      OpenApi__HideDocument: 'false'
-      OpenApi__DocTitle: 'MathStorm Game APIs'
-      OpenApi__DocDescription: 'This repo is an example of a GitHub Copilot Agent Vibe Coded Game'
-      appInsightsConnectionString: logAnalyticsWorkspaceModule.outputs.appInsightsConnectionString
-      CosmosDb__Endpoint: deployCosmos ? cosmosModule.outputs.endpoint : ''
+      ConnectionStrings__ApplicationInsights: logAnalyticsWorkspaceModule.outputs.webAppInsightsConnectionString
+      // Cosmos DB settings (now configured directly in web app)
+      CosmosDb__Endpoint: 'https://${cosmosModule.outputs.name}.documents.azure.com:443/'
+      CosmosDb__ConnectionString: '@Microsoft.KeyVault(SecretUri=${keyVaultSecretCosmos.outputs.connectionStringSecretName})'
       CosmosDb__DatabaseName: cosmosDatabaseName 
       CosmosDb__ContainerNames__Users: userContainerName
       CosmosDb__ContainerNames__Games: gameContainerName
       CosmosDb__ContainerNames__Leaderboard: leaderboardContainerName
+      // OpenAI settings (now configured directly in web app)
+      OpenAI__Models__gpt_4o_mini__DeploymentName: 'gpt-4o-mini'
+      OpenAI__Models__gpt_4o_mini__Endpoint: OpenAI_Endpoint
+      OpenAI__Models__gpt_4o_mini__ApiKey: '@Microsoft.KeyVault(SecretUri=${keyVaultSecretOpenAI.outputs.secretUri})'
+      OpenAI__DefaultModel: 'gpt_4o_mini'
+      OpenAI__Temperature: '0.8'
     }
   }
 }
@@ -305,4 +249,3 @@ module functionAppSettingsModule './modules/functions/functionappsettings.bicep'
 output SUBSCRIPTION_ID string = subscription().subscriptionId
 output RESOURCE_GROUP_NAME string = resourceGroupName
 output WEB_HOST_NAME string = webSiteModule.outputs.hostName
-output FUNCTION_HOST_NAME string = functionModule.outputs.hostname
